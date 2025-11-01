@@ -20,7 +20,7 @@ import openai
 # -----------------------------
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-FOIL_STAMP_PATH = "Assets/Foil_Stamp.png"
+FOIL_STAMP_PATH = "Assets/Foil_stamp.png"
 WEBHOOK_PATH = "/telegram_webhook"
 PORT = int(os.environ.get("PORT", 10000))
 DOMAIN = os.getenv("RENDER_EXTERNAL_URL", "https://your-render-domain.com")
