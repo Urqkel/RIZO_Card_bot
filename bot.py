@@ -20,7 +20,7 @@ import openai
 # -----------------------------
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-FOIL_STAMP_PATH = "Assets/Foil_stamp.png"
+FOIL_STAMP_PATH = "assets/Foil_stamp.png"
 WEBHOOK_PATH = "/telegram_webhook"
 PORT = int(os.environ.get("PORT", 10000))
 DOMAIN = os.getenv("RENDER_EXTERNAL_URL", "https://your-render-domain.com")
@@ -77,7 +77,7 @@ def generate_rizo_card(image_bytes_io, prompt_text):
     return Image.open(io.BytesIO(base64.b64decode(card_b64)))
 
 
-def add_foil_stamp(card_image: Image.Image, logo_path="Assets/Foil_stamp.png"):
+def add_foil_stamp(card_image: Image.Image, logo_path="assets/Foil_stamp.png"):
     card = card_image.convert("RGBA")
     logo = Image.open(logo_path).convert("RGBA")
 
