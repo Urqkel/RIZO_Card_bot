@@ -53,7 +53,7 @@ Layout & spacing rules:
 # -----------------------------
 # Helper functions
 # -----------------------------
-def generate_suimon_card(image_bytes_io, prompt_text):
+def generate_rizo_card(image_bytes_io, prompt_text):
     image_bytes_io.seek(0)
     img = Image.open(image_bytes_io)
     if img.mode != "RGBA":
@@ -64,7 +64,7 @@ def generate_suimon_card(image_bytes_io, prompt_text):
     img_bytes_io.name = "meme.png"
     img_bytes_io.seek(0)
 
-    full_prompt = f"Use the uploaded image as the main character for a SUIMON card. {prompt_text}"
+    full_prompt = f"Use the uploaded image as the main character for a RIZO card. {prompt_text}"
 
     response = openai.images.edit(
         model="gpt-image-1",
@@ -154,7 +154,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     try:
-        card_image = generate_suimon_card(meme_bytes_io, PROMPT_TEMPLATE)
+        card_image = generate_rizo_card(meme_bytes_io, PROMPT_TEMPLATE)
 
         hp_ok = check_hp_visibility(card_image)
         flavor_ok = check_flavor_text(card_image)
