@@ -124,14 +124,14 @@ def check_flavor_text(card_image: Image.Image):
 # -----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Welcome to RIZO card creator! Use /generate to start creating a RIZO card 🃏"
+        "Welcome to RIZO card creator! Use /generate to create a RIZO meme card 🃏"
     )
 
 
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["can_generate"] = True
     await update.message.reply_text(
-        "Send me a meme image, and I’ll craft a unique RIZO card for you 🃏"
+        "Send me a RIZO meme image, and I’ll craft a unique RIZO card for you 🃏"
     )
 
 
