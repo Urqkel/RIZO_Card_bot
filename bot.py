@@ -77,7 +77,7 @@ def generate_suimon_card(image_bytes_io, prompt_text):
     return Image.open(io.BytesIO(base64.b64decode(card_b64)))
 
 
-def add_foil_stamp(card_image: Image.Image, logo_path="Assets/Foil_Stamp.png"):
+def add_foil_stamp(card_image: Image.Image, logo_path="Assets/Foil_stamp.png"):
     card = card_image.convert("RGBA")
     logo = Image.open(logo_path).convert("RGBA")
 
