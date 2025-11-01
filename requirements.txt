@@ -1,0 +1,6 @@
+python-telegram-bot[webhooks]==20.3
+fastapi
+uvicorn
+pillow
+openai
+pytesseract
