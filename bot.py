@@ -33,6 +33,7 @@ Create a RIZO digital trading card using the uploaded meme image as the main cha
 
 Design guidelines:
 - Always invent a unique, creative character name that matches the personality or vibe of the uploaded image.
+- NEVER use the words hedgie or hedgehog in the characters name.
 - ALWAYS add the word "RIZO" at the end of the character name.
 - Maintain a balanced layout with well-spaced elements.
 - Include all standard card elements: name, HP, element, two attacks, flavor text, and themed background/frame.
