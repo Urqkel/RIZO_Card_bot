@@ -5,7 +5,7 @@ import base64
 import asyncio
 import random
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,7 +20,6 @@ from telegram.ext import (
 from PIL import Image
 import pytesseract
 
-# OpenAI v1.x SDK
 from openai import OpenAI
 
 # -----------------------------
@@ -40,16 +39,11 @@ PORT = int(os.getenv("PORT", "10000"))
 DOMAIN = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("DOMAIN") or "https://your-domain.example"
 WEBHOOK_URL = f"{DOMAIN.rstrip('/')}{WEBHOOK_PATH}"
 
-# concurrency/cooldown
 MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "3"))
 USER_COOLDOWN_SECONDS = int(os.getenv("USER_COOLDOWN_SECONDS", "300"))
-
-# foil offsets / scale
 FOIL_SCALE = float(os.getenv("FOIL_SCALE", "0.13"))
 FOIL_X_OFFSET = float(os.getenv("FOIL_X_OFFSET", "0.0"))
 FOIL_Y_OFFSET = float(os.getenv("FOIL_Y_OFFSET", "0.0"))
-
-# Retry attempts for OpenAI per-request
 OPENAI_RETRY_ATTEMPTS = int(os.getenv("OPENAI_RETRY_ATTEMPTS", "2"))
 
 if not BOT_TOKEN:
@@ -83,18 +77,17 @@ Layout & spacing rules:
 """
 
 # -----------------------------
-# Concurrency + cooldown tracking
+# Concurrency + cooldown
 # -----------------------------
 semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
 user_last_request = {}  # user_id -> datetime
 
 # -----------------------------
-# OpenAI helpers (per-request client rotation + retry)
+# OpenAI helpers
 # -----------------------------
 def pick_openai_key(exclude_keys=None):
     candidates = [k for k in OPENAI_KEYS if not (exclude_keys and k in exclude_keys)]
     if not candidates:
-        # fallback to all if all excluded
         return random.choice(OPENAI_KEYS)
     return random.choice(candidates)
 
@@ -102,58 +95,57 @@ def create_openai_client(key: str):
     return OpenAI(api_key=key)
 
 async def openai_images_edit_with_retries(image_io: io.BytesIO, prompt_text: str, size="1024x1536"):
-    """Try multiple keys with simple retry/backoff. Returns PIL.Image on success."""
     tried = set()
     last_exc = None
-
     for attempt in range(OPENAI_RETRY_ATTEMPTS + 1):
         key = pick_openai_key(exclude_keys=tried)
         tried.add(key)
         client = create_openai_client(key)
 
-        # ensure image stream at beginning for this attempt
         image_io.seek(0)
-
         try:
-            # The openai client call might be blocking; run it in a thread
             def call_api():
-                # This mirrors the Images Edit call pattern; adjust if your client version differs
-                return client.images.edit(model="gpt-image-1", image=image_io, prompt=prompt_text, size=size)
-
+                return client.images.edit(
+                    model="gpt-image-1",
+                    image=image_io,
+                    prompt=prompt_text,
+                    size=size
+                )
             response = await asyncio.to_thread(call_api)
-            # response.data[0].b64_json is expected from the images.edit response
             card_b64 = response.data[0].b64_json
-            img = Image.open(io.BytesIO(base64.b64decode(card_b64)))
-            return img
-
+            return Image.open(io.BytesIO(base64.b64decode(card_b64)))
         except Exception as exc:
             last_exc = exc
             log.warning("OpenAI image call failed (key %s...): %s", key[:8], exc)
-            # small backoff
             await asyncio.sleep(1 + attempt * 2)
-
-    # if all tries exhausted, raise last exception
     raise last_exc
 
 # -----------------------------
-# Image processing helpers (blocking; run via to_thread)
+# Image processing helpers
 # -----------------------------
+def prepare_image_bytes_io(image_bytes_io: io.BytesIO, format="PNG") -> io.BytesIO:
+    image_bytes_io.seek(0)
+    img = Image.open(image_bytes_io)
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+    out_io = io.BytesIO()
+    img.save(out_io, format=format)
+    out_io.name = f"meme.{format.lower()}"  # Important for OpenAI
+    out_io.seek(0)
+    return out_io
+
 def add_foil_stamp_sync(card_image: Image.Image, logo_path=FOIL_STAMP_PATH):
     card = card_image.convert("RGBA")
     logo = Image.open(logo_path).convert("RGBA")
-
     logo_width = int(card.width * FOIL_SCALE)
     ratio = logo_width / logo.width
     logo_height = int(logo.height * ratio)
     logo_resized = logo.resize((logo_width, logo_height), Image.LANCZOS)
-
     pos_x = int(card.width - logo_width + card.width * FOIL_X_OFFSET)
     pos_y = int(card.height - logo_height + card.height * FOIL_Y_OFFSET)
-
     tmp = Image.new("RGBA", card.size)
     tmp.paste(logo_resized, (pos_x, pos_y), logo_resized)
     card = Image.alpha_composite(card, tmp)
-
     out = io.BytesIO()
     card.save(out, format="PNG")
     out.seek(0)
@@ -163,8 +155,7 @@ def check_hp_visibility_sync(card_image: Image.Image):
     try:
         txt = pytesseract.image_to_string(card_image)
         return "HP" in txt.upper()
-    except Exception as exc:
-        log.warning("OCR HP check failed: %s", exc)
+    except Exception:
         return False
 
 def check_flavor_text_sync(card_image: Image.Image):
@@ -174,8 +165,7 @@ def check_flavor_text_sync(card_image: Image.Image):
         flavor_candidates = [ln for ln in lines if 5 < len(ln) < 80 and "weak" not in ln.lower() and "resist" not in ln.lower()]
         unique = list(dict.fromkeys(flavor_candidates))
         return len(flavor_candidates) == len(unique)
-    except Exception as exc:
-        log.warning("OCR flavor check failed: %s", exc)
+    except Exception:
         return True
 
 # -----------------------------
@@ -193,60 +183,38 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         await update.message.reply_text("Couldn't identify user.")
         return
-
     user_id = user.id
     now = datetime.utcnow()
-
-    # cooldown check
     last = user_last_request.get(user_id)
     if last and (now - last).total_seconds() < USER_COOLDOWN_SECONDS:
         remain = int(USER_COOLDOWN_SECONDS - (now - last).total_seconds())
         await update.message.reply_text(f"⚠️ Please wait {remain}s before generating another card.")
         return
-
     if not context.user_data.get("can_generate", False):
         await update.message.reply_text("⚠️ Please use /generate or press 'Create another RIZO card' before sending an image.")
         return
 
-    # mark user as busy/cooldown
     context.user_data["can_generate"] = False
     user_last_request[user_id] = now
-
     await update.message.reply_text("🎨 Generating your RIZO card... hang tight!")
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
-    # download photo
     try:
         photo = update.message.photo[-1]
         photo_file = await photo.get_file()
-        meme_bytes = io.BytesIO()
-        await photo_file.download_to_memory(out=meme_bytes)
-        meme_bytes.seek(0)
-    except Exception as exc:
-        log.exception("Failed to download photo: %s", exc)
-        context.user_data["can_generate"] = True
-        await update.message.reply_text("Failed to download your image. Try again.")
-        return
+        meme_bytes = io.BytesIO(await photo_file.download_as_bytearray())
+        meme_bytes = await asyncio.to_thread(prepare_image_bytes_io, meme_bytes)
 
-    try:
         async with semaphore:
-            # 1) OpenAI image edit with retries (runs blocking network in thread inside helper)
-            card_image = await openai_images_edit_with_retries(meme_bytes, PROMPT_TEMPLATE, size="1024x1536")
-
-            # 2) OCR checks (run in threads)
+            card_image = await openai_images_edit_with_retries(meme_bytes, PROMPT_TEMPLATE)
             hp_task = asyncio.to_thread(check_hp_visibility_sync, card_image)
             flav_task = asyncio.to_thread(check_flavor_text_sync, card_image)
             hp_ok, flavor_ok = await asyncio.gather(hp_task, flav_task)
-
             if not hp_ok:
-                log.warning("HP not detected in generated card for user %s", user_id)
+                log.warning("HP not detected for user %s", user_id)
             if not flavor_ok:
                 log.warning("Flavor duplication detected for user %s", user_id)
-
-            # 3) Apply foil stamp (in thread)
             final_bytes_io = await asyncio.to_thread(add_foil_stamp_sync, card_image, FOIL_STAMP_PATH)
-
-            # 4) reply
             keyboard = [[InlineKeyboardButton("🎨 Create another RIZO card", callback_data="create_another")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             final_bytes_io.seek(0)
@@ -257,7 +225,6 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Sorry, something went wrong: {exc}")
 
     finally:
-        # allow next generation and refresh cooldown timestamp
         context.user_data["can_generate"] = True
         user_last_request[user_id] = datetime.utcnow()
 
@@ -275,8 +242,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -----------------------------
 fastapi_app = FastAPI()
 ptb_app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-# Register handlers
 ptb_app.add_handler(CommandHandler("start", start))
 ptb_app.add_handler(CommandHandler("generate", generate_cmd))
 ptb_app.add_handler(MessageHandler(filters.PHOTO, handle_image))
@@ -287,14 +252,11 @@ async def startup_event():
     log.info("Starting Telegram application...")
     await ptb_app.initialize()
     await ptb_app.start()
-    # set webhook to external URL
     try:
         await ptb_app.bot.set_webhook(WEBHOOK_URL)
         log.info("Webhook set to %s", WEBHOOK_URL)
     except Exception as exc:
         log.exception("Failed to set webhook: %s", exc)
-        # Do not raise here — letting app start may be desirable; uncomment to fail startup:
-        # raise
 
 @fastapi_app.on_event("shutdown")
 async def shutdown_event():
@@ -309,7 +271,6 @@ async def shutdown_event():
 async def telegram_webhook(req: Request):
     data = await req.json()
     update = Update.de_json(data, ptb_app.bot)
-    # hand off to the PTB queue
     await ptb_app.update_queue.put(update)
     return {"ok": True}
 
@@ -317,7 +278,6 @@ async def telegram_webhook(req: Request):
 async def health_check():
     return {"status": "ok"}
 
-# If you want to run locally via `python app.py`, provide an entrypoint
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:fastapi_app", host="0.0.0.0", port=PORT, reload=False)
+    uvicorn.run("bot:fastapi_app", host="0.0.0.0", port=PORT, reload=False)
