@@ -1,15 +1,17 @@
 services:
   - type: web
-    name: rizo-card-bot
+    name: RIZO_Card_Bot
     env: python
-    plan: starter
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn bot:fastapi_app --host 0.0.0.0 --port $PORT"
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn bot:fastapi_app --host 0.0.0.0 --port $PORT
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        value: "<YOUR_TELEGRAM_BOT_TOKEN>"
+        value: "<your-token>"
       - key: OPENAI_KEYS
-        value: "<YOUR_OPENAI_API_KEYS>"
-    autoDeploy: true
-    ports:
-      - port: 10000
+        value: "<key1>,<key2>"
+      - key: RENDER_EXTERNAL_URL
+        value: "https://your-render-domain.com"
+      - key: MAX_CONCURRENCY
+        value: "3"
+      - key: USER_COOLDOWN_SECONDS
+        value: "300"
