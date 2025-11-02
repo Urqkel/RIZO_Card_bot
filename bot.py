@@ -3,6 +3,7 @@ import io
 import base64
 import asyncio
 import random
+import logging
 import pytesseract
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
