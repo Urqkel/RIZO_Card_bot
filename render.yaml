@@ -8,8 +8,8 @@ services:
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         value: "<YOUR_TELEGRAM_BOT_TOKEN>"
-      - key: OPENAI_API_KEY
-        value: "<YOUR_OPENAI_API_KEY>"
+      - key: OPENAI_KEYS
+        value: "<YOUR_OPENAI_API_KEYS>"
     autoDeploy: true
     ports:
       - port: 10000
