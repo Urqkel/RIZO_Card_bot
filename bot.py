@@ -1,12 +1,9 @@
 import os
 import io
-import time
-import random
 import base64
-import logging
 import asyncio
-from datetime import datetime, timedelta
-
+import random
+import pytesseract
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -18,39 +15,32 @@ from telegram.ext import (
     ContextTypes,
 )
 from PIL import Image
-import pytesseract
-
-# Use the new OpenAI client per-request style
-from openai import OpenAI
-from openai.error import OpenAIError
+from openai import OpenAI, OpenAIError  # ✅ Correct import for v1.x SDK
 
 # -----------------------------
-# Config & Logging
+# Configuration
 # -----------------------------
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("rizo-bot")
-
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_KEYS = [k.strip() for k in os.getenv("OPENAI_KEYS", "").split(",") if k.strip()]
-if not OPENAI_KEYS:
-    raise RuntimeError("Please set OPENAI_KEYS (comma separated).")
-
-FOIL_STAMP_PATH = os.getenv("FOIL_STAMP_PATH", "assets/Foil_stamp.png")
-WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/telegram_webhook")
+OPENAI_KEYS = os.getenv("OPENAI_KEYS", "").split(",")  # ✅ Multiple keys
+FOIL_STAMP_PATH = "assets/Foil_stamp.png"
+WEBHOOK_PATH = "/telegram_webhook"
 PORT = int(os.environ.get("PORT", 10000))
-DOMAIN = os.getenv("RENDER_EXTERNAL_URL", os.getenv("DOMAIN", "https://your-render-domain.com"))
+DOMAIN = os.getenv("RENDER_EXTERNAL_URL", "https://your-render-domain.com")
 WEBHOOK_URL = f"{DOMAIN}{WEBHOOK_PATH}"
 
-# concurrency and cooldown config
-MAX_CONCURRENCY = int(os.getenv("OPENAI_MAX_CONCURRENCY", 3))
-RETRY_ATTEMPTS = int(os.getenv("OPENAI_RETRY_ATTEMPTS", 2))
-USER_COOLDOWN_SECONDS = int(os.getenv("USER_COOLDOWN_SECONDS", 300))  # 5 minutes default
+# -----------------------------
+# OpenAI Client Utility
+# -----------------------------
+def get_openai_client():
+    """Pick a random API key for load balancing"""
+    valid_keys = [k.strip() for k in OPENAI_KEYS if k.strip()]
+    if not valid_keys:
+        raise ValueError("No valid OpenAI API keys found in environment variable OPENAI_KEYS")
+    return OpenAI(api_key=random.choice(valid_keys))
 
-FOIL_SCALE = float(os.getenv("FOIL_SCALE", 0.13))
-FOIL_X_OFFSET = float(os.getenv("FOIL_X_OFFSET", 0.0))
-FOIL_Y_OFFSET = float(os.getenv("FOIL_Y_OFFSET", 0.0))
-
-# Your prompt template (kept from your original)
+# -----------------------------
+# Prompt Template
+# -----------------------------
 PROMPT_TEMPLATE = """
 Create a RIZO digital trading card using the uploaded meme image as the main character.
 
@@ -64,7 +54,7 @@ Layout & spacing rules:
 - Top bar: Place the character name on the left, and always render “HP” followed by the number (e.g. HP100) on the right side.
   The HP text must be completely visible, never cropped, never stylized, and always use a clean card font.
   Place the elemental icon beside the HP number, leaving at least 15% horizontal spacing so they do not touch or overlap.
-- Main art: Use the uploaded meme image as the character art, dynamically styled without changing the underlying character in the meme (remove or ignore the word RIZO or HAHAYES if present in the uploaded image). 
+- Main art: Use the uploaded meme image as the character art, dynamically styled without changing the underlying character in the meme.
 - Attack boxes: Include two creative attacks with names, icons, and damage numbers.
 - Flavor text: Include EXACTLY ONE short, unique line beneath the attacks (no repetition or duplication).
 - Footer: Weakness/resistance icons should be on the left. Leave a clear empty area in the bottom-right corner for an official foil stamp.
