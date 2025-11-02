@@ -27,6 +27,8 @@ WEBHOOK_PATH = "/telegram_webhook"
 PORT = int(os.environ.get("PORT", 10000))
 DOMAIN = os.getenv("RENDER_EXTERNAL_URL", "https://your-render-domain.com")
 WEBHOOK_URL = f"{DOMAIN}{WEBHOOK_PATH}"
+MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", 3))
+semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
 
 # -----------------------------
 # OpenAI Client Utility
