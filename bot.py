@@ -18,6 +18,12 @@ from PIL import Image
 from openai import OpenAI, OpenAIError  # ✅ Correct import for v1.x SDK
 
 # -----------------------------
+# Logging
+# -----------------------------
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("rizo-bot")
+
+# -----------------------------
 # Configuration
 # -----------------------------
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
