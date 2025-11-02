@@ -19,7 +19,6 @@ from telegram.ext import (
 )
 from PIL import Image
 import pytesseract
-
 from openai import OpenAI
 
 # -----------------------------
@@ -41,10 +40,6 @@ WEBHOOK_URL = f"{DOMAIN.rstrip('/')}{WEBHOOK_PATH}"
 
 MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "3"))
 USER_COOLDOWN_SECONDS = int(os.getenv("USER_COOLDOWN_SECONDS", "300"))
-FOIL_SCALE = float(os.getenv("FOIL_SCALE", "0.13"))
-FOIL_X_OFFSET = float(os.getenv("FOIL_X_OFFSET", "0.0"))
-FOIL_Y_OFFSET = float(os.getenv("FOIL_Y_OFFSET", "0.0"))
-OPENAI_RETRY_ATTEMPTS = int(os.getenv("OPENAI_RETRY_ATTEMPTS", "2"))
 
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
@@ -89,63 +84,64 @@ def pick_openai_key(exclude_keys=None):
     candidates = [k for k in OPENAI_KEYS if not (exclude_keys and k in exclude_keys)]
     if not candidates:
         return random.choice(OPENAI_KEYS)
-    return random.choice(candidates)
+    return random.choice(OPENAI_KEYS)
 
 def create_openai_client(key: str):
     return OpenAI(api_key=key)
 
-async def openai_images_edit_with_retries(image_io: io.BytesIO, prompt_text: str, size="1024x1536"):
+async def generate_rizo_card_openai(image_io: io.BytesIO, prompt_text: str, size="1024x1536"):
+    """
+    Generates a RIZO card using OpenAI images.generate.
+    Pass the uploaded meme in the prompt.
+    """
     tried = set()
     last_exc = None
-    for attempt in range(OPENAI_RETRY_ATTEMPTS + 1):
+    for _ in range(3):
         key = pick_openai_key(exclude_keys=tried)
         tried.add(key)
         client = create_openai_client(key)
-
         image_io.seek(0)
         try:
+            full_prompt = f"{prompt_text}\nUse the uploaded image as the main character for the card."
+            # Generate image
             def call_api():
-                return client.images.edit(
+                return client.images.generate(
                     model="gpt-image-1",
-                    image=image_io,
-                    prompt=prompt_text,
+                    prompt=full_prompt,
                     size=size
                 )
             response = await asyncio.to_thread(call_api)
             card_b64 = response.data[0].b64_json
             return Image.open(io.BytesIO(base64.b64decode(card_b64)))
-        except Exception as exc:
-            last_exc = exc
-            log.warning("OpenAI image call failed (key %s...): %s", key[:8], exc)
-            await asyncio.sleep(1 + attempt * 2)
+        except Exception as e:
+            log.warning("OpenAI generation failed with key %s: %s", key[:8], e)
+            last_exc = e
+            await asyncio.sleep(1)
     raise last_exc
 
 # -----------------------------
-# Image processing helpers
+# Image helpers
 # -----------------------------
-def prepare_image_bytes_io(image_bytes_io: io.BytesIO, format="PNG") -> io.BytesIO:
-    image_bytes_io.seek(0)
-    img = Image.open(image_bytes_io)
-    if img.mode != "RGBA":
-        img = img.convert("RGBA")
-    out_io = io.BytesIO()
-    img.save(out_io, format=format)
-    out_io.name = f"meme.{format.lower()}"  # Important for OpenAI
-    out_io.seek(0)
-    return out_io
-
 def add_foil_stamp_sync(card_image: Image.Image, logo_path=FOIL_STAMP_PATH):
     card = card_image.convert("RGBA")
     logo = Image.open(logo_path).convert("RGBA")
-    logo_width = int(card.width * FOIL_SCALE)
+
+    foil_scale = float(os.getenv("FOIL_SCALE", 0.13))
+    foil_x_offset = float(os.getenv("FOIL_X_OFFSET", 0.0))
+    foil_y_offset = float(os.getenv("FOIL_Y_OFFSET", 0.0))
+
+    logo_width = int(card.width * foil_scale)
     ratio = logo_width / logo.width
     logo_height = int(logo.height * ratio)
     logo_resized = logo.resize((logo_width, logo_height), Image.LANCZOS)
-    pos_x = int(card.width - logo_width + card.width * FOIL_X_OFFSET)
-    pos_y = int(card.height - logo_height + card.height * FOIL_Y_OFFSET)
+
+    pos_x = int(card.width - logo_width + card.width * foil_x_offset)
+    pos_y = int(card.height - logo_height + card.height * foil_y_offset)
+
     tmp = Image.new("RGBA", card.size)
     tmp.paste(logo_resized, (pos_x, pos_y), logo_resized)
     card = Image.alpha_composite(card, tmp)
+
     out = io.BytesIO()
     card.save(out, format="PNG")
     out.seek(0)
@@ -203,10 +199,10 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo = update.message.photo[-1]
         photo_file = await photo.get_file()
         meme_bytes = io.BytesIO(await photo_file.download_as_bytearray())
-        meme_bytes = await asyncio.to_thread(prepare_image_bytes_io, meme_bytes)
+        meme_bytes.name = "meme.png"  # important for OpenAI
 
         async with semaphore:
-            card_image = await openai_images_edit_with_retries(meme_bytes, PROMPT_TEMPLATE)
+            card_image = await generate_rizo_card_openai(meme_bytes, PROMPT_TEMPLATE)
             hp_task = asyncio.to_thread(check_hp_visibility_sync, card_image)
             flav_task = asyncio.to_thread(check_flavor_text_sync, card_image)
             hp_ok, flavor_ok = await asyncio.gather(hp_task, flav_task)
@@ -215,6 +211,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not flavor_ok:
                 log.warning("Flavor duplication detected for user %s", user_id)
             final_bytes_io = await asyncio.to_thread(add_foil_stamp_sync, card_image, FOIL_STAMP_PATH)
+
             keyboard = [[InlineKeyboardButton("🎨 Create another RIZO card", callback_data="create_another")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             final_bytes_io.seek(0)
@@ -223,7 +220,6 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as exc:
         log.exception("Error generating card: %s", exc)
         await update.message.reply_text(f"Sorry, something went wrong: {exc}")
-
     finally:
         context.user_data["can_generate"] = True
         user_last_request[user_id] = datetime.utcnow()
@@ -280,4 +276,4 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("bot:fastapi_app", host="0.0.0.0", port=PORT, reload=False)
+    uvicorn.run("bot:fastapi_app", host="0.0.0.0", port=PORT)
