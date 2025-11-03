@@ -81,7 +81,7 @@ Layout & spacing rules:
 - Footer: Weakness/resistance icons should be on the left. Leave a clear empty area in the bottom-right corner for an official foil stamp.
 - The foil stamp area must stay completely blank — do not draw or add any art or borders there.
 - The foil stamp is a subtle circular authenticity mark that will be imprinted later.
-- Overall aesthetic: vintage, realistic, collectible, with slight texture and warmth, but without altering any provided logos.
+- Overall aesthetic: realistic, dynamic, collectible, with slight texture and warmth, but without altering any provided logos.
 """
 
 # -----------------------------
