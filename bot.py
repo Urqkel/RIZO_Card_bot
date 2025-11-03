@@ -1,12 +1,8 @@
-# bot.py - RIZO Card Bot (FastAPI + python-telegram-bot)
 import os
 import io
 import base64
 import asyncio
-import random
 import logging
-from datetime import datetime
-
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -18,33 +14,29 @@ from telegram.ext import (
     ContextTypes,
 )
 from PIL import Image
-import pytesseract
 from openai import OpenAI
 
 # -----------------------------
-# Logging
-# -----------------------------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-log = logging.getLogger("rizo-bot")
-
-# -----------------------------
-# Configuration (ENV)
+# Configuration
 # -----------------------------
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_KEYS = [k.strip() for k in os.getenv("OPENAI_KEYS", "").split(",") if k.strip()]
-FOIL_STAMP_PATH = os.getenv("FOIL_STAMP_PATH", "assets/Foil_stamp.png")
-WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/telegram_webhook")
-PORT = int(os.getenv("PORT", "10000"))
-DOMAIN = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("DOMAIN") or "https://your-domain.example"
-WEBHOOK_URL = f"{DOMAIN.rstrip('/')}{WEBHOOK_PATH}"
+OPENAI_API_KEYS = [k.strip() for k in os.getenv("OPENAI_API_KEYS", "").split(",") if k.strip()]
+FOIL_STAMP_PATH = "assets/Foil_stamp.png"
+WEBHOOK_PATH = "/telegram_webhook"
+PORT = int(os.environ.get("PORT", 10000))
+DOMAIN = os.getenv("RENDER_EXTERNAL_URL", "https://your-render-domain.com")
+WEBHOOK_URL = f"{DOMAIN}{WEBHOOK_PATH}"
 
-MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "3"))
-USER_COOLDOWN_SECONDS = int(os.getenv("USER_COOLDOWN_SECONDS", "300"))
+MAX_CONCURRENCY = 3
+USER_COOLDOWN = 60  # seconds
 
-if not BOT_TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN env var is required")
-if not OPENAI_KEYS:
-    raise RuntimeError("OPENAI_KEYS env var is required (comma-separated OpenAI API keys)")
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("rizo-card-bot")
+
+clients = [OpenAI(api_key=k) for k in OPENAI_API_KEYS] or [OpenAI()]
+client_index = 0
+semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
+user_last_request = {}
 
 # -----------------------------
 # Prompt Template
@@ -72,57 +64,31 @@ Layout & spacing rules:
 """
 
 # -----------------------------
-# Concurrency + cooldown
+# Helper functions
 # -----------------------------
-semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
-user_last_request = {}  # user_id -> datetime
+async def generate_rizo_card(image_bytes_io: io.BytesIO, prompt_text: str):
+    global client_index
+    async with semaphore:
+        client = clients[client_index]
+        client_index = (client_index + 1) % len(clients)
 
-# -----------------------------
-# OpenAI helpers
-# -----------------------------
-def pick_openai_key(exclude_keys=None):
-    candidates = [k for k in OPENAI_KEYS if not (exclude_keys and k in exclude_keys)]
-    if not candidates:
-        return random.choice(OPENAI_KEYS)
-    return random.choice(OPENAI_KEYS)
+        image_bytes_io.seek(0)
+        b64_image = base64.b64encode(image_bytes_io.read()).decode("utf-8")
 
-def create_openai_client(key: str):
-    return OpenAI(api_key=key)
+        full_prompt = f"Use this meme image as the main character for a RIZO card.\n\n{prompt_text}"
 
-async def generate_rizo_card_openai(image_io: io.BytesIO, prompt_text: str, size="1024x1536"):
-    """
-    Generates a RIZO card using OpenAI images.generate.
-    Pass the uploaded meme in the prompt.
-    """
-    tried = set()
-    last_exc = None
-    for _ in range(3):
-        key = pick_openai_key(exclude_keys=tried)
-        tried.add(key)
-        client = create_openai_client(key)
-        image_io.seek(0)
-        try:
-            full_prompt = f"{prompt_text}\nUse the uploaded image as the main character for the card."
-            # Generate image
-            def call_api():
-                return client.images.generate(
-                    model="gpt-image-1",
-                    prompt=full_prompt,
-                    size=size
-                )
-            response = await asyncio.to_thread(call_api)
-            card_b64 = response.data[0].b64_json
-            return Image.open(io.BytesIO(base64.b64decode(card_b64)))
-        except Exception as e:
-            log.warning("OpenAI generation failed with key %s: %s", key[:8], e)
-            last_exc = e
-            await asyncio.sleep(1)
-    raise last_exc
+        response = client.images.generate(
+            model="gpt-image-1",
+            prompt=full_prompt,
+            size="1024x1536",
+            image=[{"b64_json": b64_image, "mime_type": "image/png"}]
+        )
 
-# -----------------------------
-# Image helpers
-# -----------------------------
-def add_foil_stamp_sync(card_image: Image.Image, logo_path=FOIL_STAMP_PATH):
+        card_b64 = response.data[0].b64_json
+        return Image.open(io.BytesIO(base64.b64decode(card_b64)))
+
+
+def add_foil_stamp(card_image: Image.Image, logo_path="assets/Foil_stamp.png"):
     card = card_image.convert("RGBA")
     logo = Image.open(logo_path).convert("RGBA")
 
@@ -138,130 +104,107 @@ def add_foil_stamp_sync(card_image: Image.Image, logo_path=FOIL_STAMP_PATH):
     pos_x = int(card.width - logo_width + card.width * foil_x_offset)
     pos_y = int(card.height - logo_height + card.height * foil_y_offset)
 
-    tmp = Image.new("RGBA", card.size)
-    tmp.paste(logo_resized, (pos_x, pos_y), logo_resized)
-    card = Image.alpha_composite(card, tmp)
+    card.alpha_composite(logo_resized, dest=(pos_x, pos_y))
 
-    out = io.BytesIO()
-    card.save(out, format="PNG")
-    out.seek(0)
-    return out
+    output = io.BytesIO()
+    card.save(output, format="PNG")
+    output.seek(0)
+    return output
 
-def check_hp_visibility_sync(card_image: Image.Image):
-    try:
-        txt = pytesseract.image_to_string(card_image)
-        return "HP" in txt.upper()
-    except Exception:
-        return False
-
-def check_flavor_text_sync(card_image: Image.Image):
-    try:
-        txt = pytesseract.image_to_string(card_image)
-        lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
-        flavor_candidates = [ln for ln in lines if 5 < len(ln) < 80 and "weak" not in ln.lower() and "resist" not in ln.lower()]
-        unique = list(dict.fromkeys(flavor_candidates))
-        return len(flavor_candidates) == len(unique)
-    except Exception:
-        return True
 
 # -----------------------------
-# Telegram handlers
+# Telegram Handlers
 # -----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Welcome to RIZO card creator! Use /generate to create a RIZO meme card 🃏")
+    await update.message.reply_text(
+        "Welcome to RIZO card creator! Use /generate to create a RIZO meme card 🃏"
+    )
 
-async def generate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["can_generate"] = True
-    await update.message.reply_text("Send me a RIZO meme image, and I’ll craft a unique RIZO card for you 🃏")
+    await update.message.reply_text(
+        "Send me a RIZO meme image, and I’ll craft a unique RIZO card for you 🃏"
+    )
+
 
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user:
-        await update.message.reply_text("Couldn't identify user.")
-        return
-    user_id = user.id
-    now = datetime.utcnow()
-    last = user_last_request.get(user_id)
-    if last and (now - last).total_seconds() < USER_COOLDOWN_SECONDS:
-        remain = int(USER_COOLDOWN_SECONDS - (now - last).total_seconds())
-        await update.message.reply_text(f"⚠️ Please wait {remain}s before generating another card.")
-        return
+    user_id = update.effective_user.id
+    now = asyncio.get_event_loop().time()
     if not context.user_data.get("can_generate", False):
-        await update.message.reply_text("⚠️ Please use /generate or press 'Create another RIZO card' before sending an image.")
+        await update.message.reply_text(
+            "⚠️ Please use /generate or tap 'Create another RIZO card' first."
+        )
         return
 
-    context.user_data["can_generate"] = False
+    last_time = user_last_request.get(user_id, 0)
+    if now - last_time < USER_COOLDOWN:
+        remaining = int(USER_COOLDOWN - (now - last_time))
+        await update.message.reply_text(
+            f"🕓 Please wait {remaining}s before generating another card."
+        )
+        return
     user_last_request[user_id] = now
-    await update.message.reply_text("🎨 Generating your RIZO card... hang tight!")
+    context.user_data["can_generate"] = False
+
+    await update.message.reply_text("🎨 Generating your RIZO card... please wait!")
+
+    photo = update.message.photo[-1]
+    photo_file = await photo.get_file()
+    meme_bytes_io = io.BytesIO()
+    await photo_file.download_to_memory(out=meme_bytes_io)
+    meme_bytes_io.seek(0)
+
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     try:
-        photo = update.message.photo[-1]
-        photo_file = await photo.get_file()
-        meme_bytes = io.BytesIO(await photo_file.download_as_bytearray())
-        meme_bytes.name = "meme.png"  # important for OpenAI
+        card_image = await asyncio.to_thread(generate_rizo_card, meme_bytes_io, PROMPT_TEMPLATE)
+        final_card_bytes = add_foil_stamp(card_image, FOIL_STAMP_PATH)
 
-        async with semaphore:
-            card_image = await generate_rizo_card_openai(meme_bytes, PROMPT_TEMPLATE)
-            hp_task = asyncio.to_thread(check_hp_visibility_sync, card_image)
-            flav_task = asyncio.to_thread(check_flavor_text_sync, card_image)
-            hp_ok, flavor_ok = await asyncio.gather(hp_task, flav_task)
-            if not hp_ok:
-                log.warning("HP not detected for user %s", user_id)
-            if not flavor_ok:
-                log.warning("Flavor duplication detected for user %s", user_id)
-            final_bytes_io = await asyncio.to_thread(add_foil_stamp_sync, card_image, FOIL_STAMP_PATH)
+        keyboard = [[InlineKeyboardButton("🎨 Create another RIZO card", callback_data="create_another")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
-            keyboard = [[InlineKeyboardButton("🎨 Create another RIZO card", callback_data="create_another")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            final_bytes_io.seek(0)
-            await update.message.reply_photo(photo=final_bytes_io, caption="Here’s your RIZO card! 🃏", reply_markup=reply_markup)
+        await update.message.reply_photo(
+            photo=final_card_bytes,
+            caption="Here’s your RIZO card! 🃏",
+            parse_mode="HTML",
+            reply_markup=reply_markup
+        )
 
-    except Exception as exc:
-        log.exception("Error generating card: %s", exc)
-        await update.message.reply_text(f"Sorry, something went wrong: {exc}")
-    finally:
-        context.user_data["can_generate"] = True
-        user_last_request[user_id] = datetime.utcnow()
+    except Exception as e:
+        log.error(f"Error during card generation: {e}")
+        await update.message.reply_text(f"Sorry, something went wrong: {e}")
+
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if not query:
-        return
     await query.answer()
     if query.data == "create_another":
         context.user_data["can_generate"] = True
-        await query.message.reply_text("Awesome! Send me a new meme image, and I'll make another RIZO card for you.")
+        await query.message.reply_text(
+            "Awesome! Send me a new meme image, and I'll make another RIZO card for you."
+        )
+
 
 # -----------------------------
-# FastAPI + PTB setup
+# FastAPI + PTB Setup
 # -----------------------------
 fastapi_app = FastAPI()
 ptb_app = ApplicationBuilder().token(BOT_TOKEN).build()
+
 ptb_app.add_handler(CommandHandler("start", start))
-ptb_app.add_handler(CommandHandler("generate", generate_cmd))
+ptb_app.add_handler(CommandHandler("generate", generate))
 ptb_app.add_handler(MessageHandler(filters.PHOTO, handle_image))
 ptb_app.add_handler(CallbackQueryHandler(button_callback))
 
+
 @fastapi_app.on_event("startup")
 async def startup_event():
-    log.info("Starting Telegram application...")
     await ptb_app.initialize()
     await ptb_app.start()
-    try:
-        await ptb_app.bot.set_webhook(WEBHOOK_URL)
-        log.info("Webhook set to %s", WEBHOOK_URL)
-    except Exception as exc:
-        log.exception("Failed to set webhook: %s", exc)
+    await ptb_app.bot.set_webhook(WEBHOOK_URL)
+    log.info("Bot started and webhook set to %s", WEBHOOK_URL)
 
-@fastapi_app.on_event("shutdown")
-async def shutdown_event():
-    log.info("Stopping Telegram application...")
-    try:
-        await ptb_app.stop()
-        await ptb_app.shutdown()
-    except Exception as exc:
-        log.exception("Error during shutdown: %s", exc)
 
 @fastapi_app.post(WEBHOOK_PATH)
 async def telegram_webhook(req: Request):
@@ -270,10 +213,7 @@ async def telegram_webhook(req: Request):
     await ptb_app.update_queue.put(update)
     return {"ok": True}
 
+
 @fastapi_app.get("/health")
 async def health_check():
     return {"status": "ok"}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("bot:fastapi_app", host="0.0.0.0", port=PORT)
