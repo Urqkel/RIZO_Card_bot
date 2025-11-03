@@ -3,48 +3,43 @@ import io
 import random
 import logging
 import asyncio
+import base64
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
-from telegram import (
-    Update,
-    InputFile,
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from openai import AsyncOpenAI
 from PIL import Image
 
-# ----------------------------------------------------
+# -----------------------------
 # CONFIGURATION
-# ----------------------------------------------------
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://yourapp.onrender.com/telegram_webhook
+# -----------------------------
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.getenv("PORT", 10000))
+WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_URL')}/webhook/{BOT_TOKEN}"
 
-# Multiple OpenAI API keys for load balancing (comma-separated)
+# OpenAI keys (comma-separated)
 OPENAI_API_KEYS = os.getenv("OPENAI_API_KEYS", os.getenv("OPENAI_API_KEY", "")).split(",")
 
-MAX_CONCURRENCY = 3  # concurrent image generations allowed
+MAX_CONCURRENCY = 3
 semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
 
-# Logging setup
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("rizo-card-bot")
+logger = logging.getLogger("rizo-bot")
 
-# ----------------------------------------------------
+# -----------------------------
 # OpenAI Clients
-# ----------------------------------------------------
+# -----------------------------
 clients = [AsyncOpenAI(api_key=k.strip()) for k in OPENAI_API_KEYS if k.strip()]
 if not clients:
-    raise ValueError("❌ No OpenAI API keys found in environment variable OPENAI_API_KEYS or OPENAI_API_KEY.")
+    raise ValueError("No valid OpenAI API keys found in environment variables.")
 
-# ----------------------------------------------------
+def get_random_client() -> AsyncOpenAI:
+    return random.choice(clients)
+
+# -----------------------------
 # Prompt Template
-# ----------------------------------------------------
+# -----------------------------
 PROMPT_TEMPLATE = """
 Create a RIZO digital trading card using the uploaded meme image as the main character.
 
@@ -67,106 +62,104 @@ Layout & spacing rules:
 - Overall aesthetic: vintage, realistic, collectible, with slight texture and warmth, but without altering any provided logos.
 """
 
-# ----------------------------------------------------
-# Telegram Bot Setup
-# ----------------------------------------------------
-fastapi_app = FastAPI()
+# -----------------------------
+# FastAPI App
+# -----------------------------
+app = FastAPI()
+telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-
-# ----------------------------------------------------
-# Utility: Choose random OpenAI client
-# ----------------------------------------------------
-def get_random_client() -> AsyncOpenAI:
-    return random.choice(clients)
-
-
-# ----------------------------------------------------
+# -----------------------------
 # Telegram Handlers
-# ----------------------------------------------------
+# -----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🎴 Welcome to the RIZO Card Bot!\n\n"
-        "Send me an image or meme, and I'll turn it into a RIZO trading card!"
+        "🎴 Welcome to RIZO Card Bot!\nSend me a meme image, and I'll turn it into a RIZO card!"
     )
 
-
-async def generate_rizo_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles image uploads and generates RIZO cards."""
+async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.photo:
-        await update.message.reply_text("Please send an image to generate your RIZO card!")
+        await update.message.reply_text("Please send a valid image!")
         return
 
     photo = update.message.photo[-1]
     file = await photo.get_file()
     image_bytes = await file.download_as_bytearray()
 
-    # Pick random client for load balancing
-    client = get_random_client()
-
     await update.message.reply_text("🎨 Generating your RIZO card... please wait!")
 
     async with semaphore:
         try:
-            # Convert image to acceptable format
             img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             buf.seek(0)
 
-            # Generate RIZO Card using GPT-Image-1
+            client = get_random_client()
             response = await client.images.generate(
                 model="gpt-image-1",
                 prompt=PROMPT_TEMPLATE,
                 image=buf,
-                size="1024x1024",
+                size="1024x1024"
             )
 
-            image_base64 = response.data[0].b64_json
-            image_bytes = io.BytesIO(base64.b64decode(image_base64))
-            image_bytes.name = "rizo_card.png"
+            card_b64 = response.data[0].b64_json
+            card_bytes = io.BytesIO(base64.b64decode(card_b64))
+            card_bytes.name = "rizo_card.png"
 
-            await update.message.reply_photo(photo=image_bytes, caption="✨ Your RIZO Card is ready!")
+            keyboard = [[InlineKeyboardButton("🎨 Create another RIZO card", callback_data="create_another")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await update.message.reply_photo(
+                photo=card_bytes,
+                caption="✨ Here’s your RIZO card!",
+                reply_markup=reply_markup
+            )
 
         except Exception as e:
-            log.exception("Error during card generation: %s", e)
-            await update.message.reply_text(f"⚠️ Sorry, something went wrong: {e}")
+            logger.exception("Error generating card: %s", e)
+            await update.message.reply_text(f"⚠️ Something went wrong: {e}")
 
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "create_another":
+        await query.message.reply_text("Send me a new meme image, and I'll make another RIZO card for you!")
 
-# ----------------------------------------------------
-# Telegram Command Handlers
-# ----------------------------------------------------
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.PHOTO, generate_rizo_card))
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_image))
+telegram_app.add_handler(CallbackQueryHandler(button_callback))
 
-
-# ----------------------------------------------------
-# FastAPI Webhook Endpoints
-# ----------------------------------------------------
-@fastapi_app.on_event("startup")
-async def startup_event():
-    log.info("Bot started and webhook set to %s", WEBHOOK_URL)
-    await application.bot.set_webhook(WEBHOOK_URL)
-
-
-@fastapi_app.post("/telegram_webhook")
-async def telegram_webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, application.bot)
-    await application.update_queue.put(update)
-    return PlainTextResponse("ok")
-
-
-@fastapi_app.get("/")
+# -----------------------------
+# FastAPI Routes
+# -----------------------------
+@app.get("/", response_class=PlainTextResponse)
 async def root():
-    return {"status": "ok", "message": "RIZO Card Bot is alive!"}
+    return "✅ Rizo Bot is live!"
 
+@app.post(f"/webhook/{BOT_TOKEN}")
+async def telegram_webhook(req: Request):
+    data = await req.json()
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return {"ok": True}
 
-# ----------------------------------------------------
-# Run (for local debug)
-# ----------------------------------------------------
+# -----------------------------
+# Startup Event: Auto Webhook
+# -----------------------------
+@app.on_event("startup")
+async def on_startup():
+    logger.info("Setting Telegram webhook...")
+    import httpx
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook", params={"url": WEBHOOK_URL})
+            logger.info("Webhook set result: %s", resp.text)
+        except Exception as e:
+            logger.error("Failed to set webhook: %s", e)
+
+# -----------------------------
+# Run app locally
+# -----------------------------
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run("bot:fastapi_app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    uvicorn.run("bot:app", host="0.0.0.0", port=PORT)
