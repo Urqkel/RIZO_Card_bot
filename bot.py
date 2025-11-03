@@ -22,7 +22,7 @@ from PIL import Image
 # ----------------------------------------------------
 # CONFIGURATION
 # ----------------------------------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://yourapp.onrender.com/telegram_webhook
 
 # Multiple OpenAI API keys for load balancing (comma-separated)
