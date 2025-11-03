@@ -32,7 +32,7 @@ USER_COOLDOWN_SECONDS = int(os.getenv("USER_COOLDOWN_SECONDS", 300))
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN not found in environment variables")
 
-WEBHOOK_URL = f"https://{RENDER_URL}/webhook/{BOT_TOKEN}"
+WEBHOOK_URL = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
 
 # -----------------------------
 # LOGGING
