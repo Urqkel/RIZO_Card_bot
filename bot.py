@@ -175,9 +175,11 @@ async def generate_rizo_card(image_bytes_io: io.BytesIO, prompt_text: str) -> Im
 # Helper: foil stamp overlay
 # -----------------------------
 def add_foil_stamp(card_image: Image.Image, logo_path: str = FOIL_STAMP_PATH) -> io.BytesIO:
+    """Overlay foil stamp image onto the bottom-right corner of a card and return a BytesIO PNG."""
     card = card_image.convert("RGBA")
     logo = Image.open(logo_path).convert("RGBA")
 
+    # Scale logo based on card width
     logo_width = int(card.width * FOIL_SCALE)
     if logo_width <= 0:
         logo_width = int(card.width * 0.13)
@@ -185,22 +187,20 @@ def add_foil_stamp(card_image: Image.Image, logo_path: str = FOIL_STAMP_PATH) ->
     logo_height = int(logo.height * ratio)
     logo_resized = logo.resize((logo_width, logo_height), Image.LANCZOS)
 
+    # Compute position with offsets
     pos_x = int(card.width - logo_width + card.width * FOIL_X_OFFSET)
     pos_y = int(card.height - logo_height + card.height * FOIL_Y_OFFSET)
 
-    # paste using alpha composite
-    tmp = Image.new("RGBA", card.size)
-    tmp.paste(logo_resized, (pos_x, pos_y), logo_resized)
-    out = Image.alpha_composite(card, tmp)
+    # Paste using alpha composite
+    overlay = Image.new("RGBA", card.size)
+    overlay.paste(logo_resized, (pos_x, pos_y), logo_resized)
+    combined = Image.alpha_composite(card, overlay)
 
-    output = io.BytesIO()
-    out.name = "rizo_card.png"
-    out.seek(0)
-    out.truncate(0)
-    out_bytes = io.BytesIO()
-    out.save(out_bytes, format="PNG")
-    out_bytes.seek(0)
-    return out_bytes
+    # Save to bytes
+    output_bytes = io.BytesIO()
+    combined.save(output_bytes, format="PNG")
+    output_bytes.seek(0)
+    return output_bytes
 
 # -----------------------------
 # Cooldowns state
@@ -213,7 +213,7 @@ user_last_request = {}  # user_id -> timestamp (float)
 async def cmd_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # set a flag telling user to send image
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-    await update.message.reply_text("Send me a meme image and I'll make a RIZO card (I'll use the uploaded image as the base).")
+    await update.message.reply_text("🦔 Send me a RIZO meme/image to create a unique RIZO meme card.🃏")
 
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -236,7 +236,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_PHOTO)
-    await update.message.reply_text("🎨 Generating your RIZO card... this may take a few seconds.")
+    await update.message.reply_text("🎨 Generating your RIZO card... back in 2 minutes.")
 
     photo = update.message.photo[-1]
     photo_file = await photo.get_file()
