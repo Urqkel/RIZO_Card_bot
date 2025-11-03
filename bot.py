@@ -72,7 +72,7 @@ Layout & spacing rules:
 # ----------------------------------------------------
 fastapi_app = FastAPI()
 
-application = Application.builder().token(BOT_TOKEN).build()
+application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
 
 # ----------------------------------------------------
