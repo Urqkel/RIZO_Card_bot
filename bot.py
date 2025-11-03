@@ -126,7 +126,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buf.seek(0)
 
             client = get_random_client()
-            response = await client.images.generate(
+            response = await client.images.edit(
                 model="gpt-image-1",
                 prompt=PROMPT_TEMPLATE,
                 size="1024x1536"
