@@ -129,7 +129,6 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             response = await client.images.generate(
                 model="gpt-image-1",
                 prompt=PROMPT_TEMPLATE,
-                image=buf,
                 size="1024x1536"
             )
 
