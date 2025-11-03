@@ -1,19 +1,15 @@
 services:
   - type: web
     name: RIZO_Card_Bot
-    env: python
-    buildCommand: |
-      apt-get update && \
-      apt-get install -y tesseract-ocr && \
-      pip install -r requirements.txt
-    startCommand: uvicorn bot:app --host 0.0.0.0 --port $PORT
+    env: docker
+    plan: free
     envVars:
       - key: BOT_TOKEN
-        value: "<your-token>"
+        value: "<your-telegram-bot-token>"
       - key: OPENAI_API_KEYS
-        value: "<key1>,<key2>"
+        value: "<comma-separated-openai-keys>"
       - key: RENDER_EXTERNAL_URL
-        value: "https://your-render-domain.com"
+        value: "https://rizo-card-bot.onrender.com"
       - key: MAX_CONCURRENCY
         value: "3"
       - key: USER_COOLDOWN_SECONDS
