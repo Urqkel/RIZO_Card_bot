@@ -6,7 +6,8 @@ import asyncio
 import base64
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
-from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ChatAction
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from openai import AsyncOpenAI
 from PIL import Image
