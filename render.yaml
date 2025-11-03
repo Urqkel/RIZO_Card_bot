@@ -5,11 +5,11 @@ services:
     buildCommand: pip install -r requirements.txt
      apt-get update && apt-get install -y tesseract-ocr
       pip install
-    startCommand: uvicorn bot:fastapi_app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn bot:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: TELEGRAM_BOT_TOKEN
+      - key: BOT_TOKEN
         value: "<your-token>"
-      - key: OPENAI_KEYS
+      - key: OPENAI_API_KEYS
         value: "<key1>,<key2>"
       - key: RENDER_EXTERNAL_URL
         value: "https://your-render-domain.com"
