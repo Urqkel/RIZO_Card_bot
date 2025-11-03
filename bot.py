@@ -87,7 +87,8 @@ telegram_app = Application.builder().token(BOT_TOKEN).build()
 # -----------------------------
 # HANDLERS
 # -----------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+--- Commands ---
+async def cms_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     await update.message.reply_text(
         "🎴 Welcome to the RIZO Card Bot!\n\n"
@@ -158,6 +159,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("Send me a new meme image and I’ll make another RIZO card!")
 
 telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("generate", cmd_generate))
 telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_image))
 telegram_app.add_handler(CallbackQueryHandler(button_callback))
 
