@@ -6,7 +6,7 @@ import asyncio
 import base64
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
-from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup, ChatAction
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from openai import AsyncOpenAI
 from PIL import Image
@@ -18,11 +18,15 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
 WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_URL')}/webhook/{BOT_TOKEN}"
 
-# OpenAI keys (comma-separated)
 OPENAI_API_KEYS = os.getenv("OPENAI_API_KEYS", os.getenv("OPENAI_API_KEY", "")).split(",")
 
 MAX_CONCURRENCY = 3
 semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
+
+FOIL_STAMP_PATH = "assets/Foil_stamp.png"
+FOIL_SCALE = float(os.getenv("FOIL_SCALE", 0.13))
+FOIL_X_OFFSET = float(os.getenv("FOIL_X_OFFSET", 0.0))
+FOIL_Y_OFFSET = float(os.getenv("FOIL_Y_OFFSET", 0.0))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("rizo-bot")
@@ -63,37 +67,67 @@ Layout & spacing rules:
 """
 
 # -----------------------------
-# FastAPI App
+# FastAPI & Telegram App
 # -----------------------------
 app = FastAPI()
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
 # -----------------------------
+# Helper Functions
+# -----------------------------
+def add_foil_stamp(card_image: Image.Image):
+    """Overlay foil stamp in bottom-right corner."""
+    card = card_image.convert("RGBA")
+    logo = Image.open(FOIL_STAMP_PATH).convert("RGBA")
+
+    # Scale foil
+    logo_width = int(card.width * FOIL_SCALE)
+    ratio = logo_width / logo.width
+    logo_height = int(logo.height * ratio)
+    logo_resized = logo.resize((logo_width, logo_height), Image.LANCZOS)
+
+    # Position
+    pos_x = int(card.width - logo_width + card.width * FOIL_X_OFFSET)
+    pos_y = int(card.height - logo_height + card.height * FOIL_Y_OFFSET)
+
+    card.alpha_composite(logo_resized, dest=(pos_x, pos_y))
+    output = io.BytesIO()
+    card.save(output, format="PNG")
+    output.seek(0)
+    output.name = "rizo_card.png"
+    return output
+
+# -----------------------------
 # Telegram Handlers
 # -----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_chat_action(ChatAction.TYPING)
     await update.message.reply_text(
         "🎴 Welcome to RIZO Card Bot!\nSend me a meme image, and I'll turn it into a RIZO card!"
     )
 
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.photo:
-        await update.message.reply_text("Please send a valid image!")
+        await update.message.reply_chat_action(ChatAction.TYPING)
+        await update.message.reply_text("⚠️ Please send a valid image!")
         return
 
     photo = update.message.photo[-1]
     file = await photo.get_file()
     image_bytes = await file.download_as_bytearray()
 
+    await update.message.reply_chat_action(ChatAction.TYPING)
     await update.message.reply_text("🎨 Generating your RIZO card... please wait!")
 
     async with semaphore:
         try:
+            # Save uploaded image
             img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             buf.seek(0)
 
+            # Generate card
             client = get_random_client()
             response = await client.images.generate(
                 model="gpt-image-1",
@@ -104,24 +138,31 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             card_b64 = response.data[0].b64_json
             card_bytes = io.BytesIO(base64.b64decode(card_b64))
-            card_bytes.name = "rizo_card.png"
+            card_bytes.seek(0)
+            card_img = Image.open(card_bytes).convert("RGBA")
+
+            # Add foil stamp
+            final_card_bytes = add_foil_stamp(card_img)
 
             keyboard = [[InlineKeyboardButton("🎨 Create another RIZO card", callback_data="create_another")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
+            await update.message.reply_chat_action(ChatAction.UPLOAD_PHOTO)
             await update.message.reply_photo(
-                photo=card_bytes,
+                photo=final_card_bytes,
                 caption="✨ Here’s your RIZO card!",
                 reply_markup=reply_markup
             )
 
         except Exception as e:
             logger.exception("Error generating card: %s", e)
+            await update.message.reply_chat_action(ChatAction.TYPING)
             await update.message.reply_text(f"⚠️ Something went wrong: {e}")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    await query.message.reply_chat_action(ChatAction.TYPING)
     if query.data == "create_another":
         await query.message.reply_text("Send me a new meme image, and I'll make another RIZO card for you!")
 
@@ -144,21 +185,40 @@ async def telegram_webhook(req: Request):
     return {"ok": True}
 
 # -----------------------------
-# Startup Event: Auto Webhook
+# Startup & Shutdown
 # -----------------------------
 @app.on_event("startup")
 async def on_startup():
-    logger.info("Setting Telegram webhook...")
+    logger.info("Starting Telegram bot...")
+    await telegram_app.initialize()
+    await telegram_app.start()
+
+    # Register webhook
     import httpx
-    async with httpx.AsyncClient() as client:
+    success = False
+    retries = 0
+    while not success and retries < 5:
         try:
-            resp = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook", params={"url": WEBHOOK_URL})
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+                    params={"url": WEBHOOK_URL}
+                )
             logger.info("Webhook set result: %s", resp.text)
+            success = True
         except Exception as e:
-            logger.error("Failed to set webhook: %s", e)
+            retries += 1
+            logger.error("Failed to set webhook (attempt %d): %s", retries, e)
+            await asyncio.sleep(2)
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    logger.info("Stopping Telegram bot...")
+    await telegram_app.stop()
+    await telegram_app.shutdown()
 
 # -----------------------------
-# Run app locally
+# Run locally
 # -----------------------------
 if __name__ == "__main__":
     import uvicorn
